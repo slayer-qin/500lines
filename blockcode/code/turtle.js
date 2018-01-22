@@ -4,7 +4,7 @@
 	var PIXEL_RATIO = window.devicePixelRatio || 1;
 	var canvasPlaceholder = document.querySelector('.canvas-placeholder');
 	var canvas = document.querySelector('.canvas');
-	var script = document.querySelector('.script');
+	var script = document.querySelector('.script')
 	var ctx = canvas.getContext('2d');
 	var cos = Math.cos, sin = Math.sin, sqrt = Math.sqrt, PI = Math.PI;
 	var DEGREE = PI / 180;

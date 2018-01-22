@@ -2,6 +2,7 @@
 	'use strict';
 
 	function createBlock(name, value, contents){
+	    // 新建1个div块
 		var item = elem('div', {'class': 'block', draggable: true, 'data-name': name}, [name]);
 		if (value !== undefined && value !== null){
 			item.appendChild(elem('input', {type: 'number', value: value}));
@@ -27,7 +28,7 @@
 	}
 
 	function blockUnits(block){
-		if (block.children.length > 1 && block.lastChild.nodeType === Node.TEXT_NODE && block.lastChild.textContent){
+		if (block.childNodes.length > 1 && block.lastChild.nodeType === Node.TEXT_NODE && block.lastChild.textContent){
 			return block.lastChild.textContent.slice(1);
 		}
 	}

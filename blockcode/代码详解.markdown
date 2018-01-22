@@ -1,0 +1,530 @@
+
+
+## blocks.js
+定义了block的基本结构
+###### Blocks 有2个结构特性. 
+1. 有一个数字参数（有默认值）
+2. 可以容纳其他block
+###### Block的基本结构如下
+```HTML
+<!-- The HTML structure of a block -->
+<div class="block" draggable="true" data-name="Right">
+    Right
+    <input type="number" value="5">
+    degrees
+</div>
+```
+除了在拖动时根据来源采取动作和只执行script中的blocks以外，在script和menu中的block块没有什么真正的区别，
+在根本上都是同样的结构，因此在拖动时我们可以直接复制block。
+
+###### 函数`createBlock(name, value, contents)` 
+返回一个代表block的DOM元素，包含全部内部元素，可以被插入文档中。可以被用来新建Menu中的blocks，从文件或本地变量localStorage中恢复block
+
+    function createBlock(name, value, contents){
+        // 参照上面的block结构新建1个div块
+        var item = elem('div',
+            {'class': 'block', draggable: true, 'data-name': name},
+            [name]
+        );
+        // 增加参数输入框
+        if (value !== undefined && value !== null){
+            item.appendChild(elem('input', {type: 'number', value: value}));
+        }
+        // 若contents是数组，则增加div块来容纳其他block,具体内容是contents数组中的blocks，也可以为空，若则contents为字符串，则为单位
+        if (Array.isArray(contents)){
+            item.appendChild(
+                elem('div', {'class': 'container'}, contents.map(function(block){
+                return createBlock.apply(null, block);
+            })));
+        }else if (typeof contents === 'string'){
+            // Add units (degrees, etc.) specifier
+            item.appendChild(document.createTextNode(' ' + contents));
+        }
+        return item;
+    }
+
+###### 另外还有几个处理blocks的功能函数:
+- `blockContents(block)` 返回一个容器block的全部子block。在容器block中调用则发挥一个数组，对简单容器执行则返回null
+- `blockValue(block)` 返回block的参数数值或null
+- `blockScript(block)` 返回一个可被JSON序列化的结构，用于以可恢复格式来存储block
+- `runBlocks(blocks)` 是一个句柄，执行数组中的全部block
+
+
+    function blockContents(block){
+        var container = block.querySelector('.container'); // 选择block中的container块
+        return container ? [].slice.call(container.children) : null; // 以数组形式返回所有子元素
+    }
+
+    function blockValue(block){
+        // 返回input元素中的值
+        var input = block.querySelector('input');
+        return input ? Number(input.value) : null;
+    }
+
+    function blockUnits(block){
+        // 返回参数单位，若子元素多余1个并且最后1个子元素是文本且有内容
+        // children不包括隐含的文本，这里应该用childNodes
+        if (block.children.length > 1 &&
+            block.lastChild.nodeType === Node.TEXT_NODE &&
+            block.lastChild.textContent){
+            return block.lastChild.textContent.slice(1);
+        }
+    }
+
+    function blockScript(block){
+        // block的格式为simple block=[name, num, unit]
+        //            或container block = [name, num, [[name, num, unit],...]]
+        // 最终的文件格式为[block1,block2]即[[name, num, unit], [name, num, [name, num, unit]]]
+        // 通过dataset获取data属性,这里是读取data-name,用于自定义data属性
+        var script = [block.dataset.name];
+        var value = blockValue(block);
+        if (value !== null){
+            script.push(blockValue(block));
+        }
+        var contents = blockContents(block);
+        var units = blockUnits(block);
+        if (contents){script.push(contents.map(blockScript));}
+        if (units){script.push(units);}
+        return script.filter(function(notNull){ return notNull !== null; });
+    }
+
+    function runBlocks(blocks){
+        // 给所有的block分配1个'run' event，即触发自定义的run事件
+        blocks.forEach(function(block){ trigger('run', block); });
+    }
+    
+###### 定义对外的操作
+把文件中的函数定义为Block的方法，以供外部调用。并且增加对`load` `unload`事件的监听.
+
+```
+	global.Block = {
+		create: createBlock,
+		value: blockValue,
+		contents: blockContents,
+		script: blockScript,
+		run: runBlocks,
+		trigger: trigger
+	};
+
+	window.addEventListener('unload', file.saveLocal, false);
+	window.addEventListener('load', file.restoreLocal, false);
+```
+    
+## drag.js
+目的是通过在Menu和Script之间的合作互动将静态的HTMLblock转杯为动态的编程语言。
+
+这里我们使用HTML5中的drag-drop操作,the specific JavaScript even虽然浏览器内建支持是很好，但是目前还有一些古怪和限制的地方，例如目前移动浏览器还没有支持。
+
+在文件一开始我们定义了几个变量，当拖动block时，我们需要指向拖动不同阶段的回调函数。
+
+    var dragTarget = null; // 正在拖动的block
+    var dragType = null; // 拖动类型，Are we dragging from the menu or from the script?
+    var scriptBlocks = []; // Blocks in the script, sorted by position
+
+取决于开始和结束的位置，拖动会产生不同的效果:
+
+- If dragging from ==script to menu, delete== `dragTarget` (remove block from script).
+- If dragging from ==script to script, move== `dragTarget` (move an existing script block).
+- If dragging from ==menu to script, copy== `dragTarget` (insert new block in script).
+- If dragging from ==menu to menu, do nothing.==
+
+###### 方法`dragStart(evt)`
+在这个方法中我们开始跟踪拖动block的起始点，是从Menu中拷贝，还是从script移动。  
+同时抓取了script中的全部block存放在1个数组中以备后续用途。  
+调用`evt.dataTransfer.setData`是用来处理因为在浏览器和其他应用或桌面之间拖动而可能产生的bug。  
+给被drag的block增加dragging的class属性值，在CSS中设置了`.block.dragging{ opacity: 0.4; }`，即class属性同时有`block`和`dragging`的元素透明度设置为0.4  
+
+    function dragStart(evt){
+        // 如果被拖动的块不是block，则返回
+        if (!matches(evt.target, '.block')) return;
+        // 若class匹配 .menu内的.block，则拖动类型为menu否则为script
+        if (matches(evt.target, '.menu .block')){
+            dragType = 'menu';
+        }else{
+            dragType = 'script';
+        }
+        // 在被拖动的block的class属性中增加'dragging'，存入dragTarget
+        // 在css中设置了
+        evt.target.classList.add('dragging');
+        dragTarget = evt.target;
+        // 取得script下所有不在被拖动的块
+        scriptBlocks = [].slice.call(
+            document.querySelectorAll('.script .block:not(.dragging)'));
+        // For dragging to take place in Firefox, we have to set this, even if
+        // we don't use it
+        // setData为一个给定的类型设置数据,与getData配合使用
+        evt.dataTransfer.setData('text/html', evt.target.outerHTML);
+        // 指定拖动时被允许的效果
+        if (matches(evt.target, '.menu .block')){
+            evt.dataTransfer.effectAllowed = 'copy';
+        }else{
+            evt.dataTransfer.effectAllowed = 'move';
+        }
+    }
+
+
+##### 拖动事件处理
+当block在拖动时，`dragenter`,`dragover`和`dragout`事件使我们有机会去通过高亮目标区域来给出视觉上的指示。
+###### `dragOEnter(evt)`方法
+进入某个区域（即某个HTML元素代码块），判断若是可移动区域(`.menu`和`.script`)，则给该区域加上`.over`的class属性值.
+在CSS中设置了`.menu.over{ background-color: BurlyWood; }`，`.script.over{ background-color: CadetBlue; }`和`.over .container{ background-color: CadetBlue;  }`使得目标区域的颜色产生变化  
+
+
+    function dragEnter(evt){
+        if (matches(evt.target, '.menu, .script, .content')){ ==//.content不知道什么区域==
+            evt.target.classList.add('over');
+            if (evt.preventDefault) { evt.preventDefault(); }// Necessary. Allows us to drop.
+        }else{
+            //进入了.menu和.script以外的区域
+            if (!matches(evt.target, '.menu *, .script *')){
+                // 若不是menu或script的子元素，则删除可能有的.over的class属性值, 
+                // 删除自己可能有的.over的class属性值
+                _findAndRemoveClass('over');
+                evt.target.classList.remove('over'); //==感觉应该可以不需要，因为只会给.menu和.script加'over'==
+            }
+        }
+        return false;
+    }
+    
+###### `dragOver(evt)`方法
+在某个区域之上时，阻止默认操作（默认不允许放置），设置drop效果。
+
+    function dragOver(evt){
+        // drag的目的地可以是menu即其子区域，script及其子区域和.content区域
+        if (!matches(evt.target, '.menu, .menu *, .script, .script *, .content')) {
+            return;
+        }
+        // Necessary. Allows us to drop.
+        // 必须的，阻止默认操作，允许放置drop
+        if (evt.preventDefault) { evt.preventDefault(); }
+        // 设置drop效果
+        if (dragType === 'menu'){
+            // See the section on the DataTransfer object.
+            evt.dataTransfer.dropEffect = 'copy';  
+        }else{
+            evt.dataTransfer.dropEffect = 'move';
+        }
+        return false;
+    }
+    
+
+###### `drop(evt)`方法
+当我们释放鼠标时，我们得到一个drop event，这是魔法发生的地方。我们需要去检查时拖动的起点（设置在`dragStart`中）和终点，然后相应的拷贝/移动或删除block。  
+另外我们通过`trigger()`方法（定义在util.js中）触发几个用于块逻辑的自定义事件，从而可以在block变化时刷新script。
+可放置的目标区域包括`.script .container, .script .block, .menu, .script`
+
+    function drop(evt){
+        if (!matches(evt.target, '.menu, .menu *, .script, .script *')) return;
+        // 放置目标区域（从自身向上最近的匹配）
+        var dropTarget = closest(
+            evt.target, '.script .container, .script .block, .menu, .script');
+        // 判断drop类型 script或menu
+        var dropType = 'script';
+        if (matches(dropTarget, '.menu')){ dropType = 'menu'; }
+        // stops the browser from redirecting. 停止事件的传播，终止事件在传播过程的捕获、目标处理或起泡阶段进一步传播,阻止它被分派到其他 Document 节点。
+        if (evt.stopPropagation) { evt.stopPropagation(); }
+        if (dragType === 'script' && dropType === 'menu'){
+            // 如果是从script移动到menu，则将其从script中删除
+            trigger('blockRemoved', dragTarget.parentElement, dragTarget);//触发blockRemoved，因为没有添加监听，不会触发功能处理，促使script刷新
+            dragTarget.parentElement.removeChild(dragTarget); //删除被拖动的block
+            /*
+              这里有一个问题，因为在ondrop事件中block被删除了，因此没办法触发ondrapend事件了
+              导致拖动中增加的.over的class属性值（.menu元素）没有被删除，因此menu中的背景色错误
+              需要手动增加一个`dragEnd(evt`)`操作
+            */
+        }else if (dragType ==='script' && dropType === 'script'){
+            // 弱国时从script拖到script，则是移动到相应的位置，某个元素之后或script的最前
+            if (matches(dropTarget, '.block')){
+                dropTarget.parentElement.insertBefore(
+                    dragTarget, dropTarget.nextSibling);
+            }else{
+                dropTarget.insertBefore(dragTarget, dropTarget.firstChildElement); //**这里应该是firstChild**
+            }
+            trigger('blockMoved', dropTarget, dragTarget);
+        }else if (dragType === 'menu' && dropType === 'script'){
+            // 如果是从menu拖到script，则是从menu拷贝到script，位置与上面相同
+            var newNode = dragTarget.cloneNode(true);
+            newNode.classList.remove('dragging');
+            if (matches(dropTarget, '.block')){
+                dropTarget.parentElement.insertBefore(
+                    newNode, dropTarget.nextSibling);
+            }else{
+                dropTarget.insertBefore(newNode, dropTarget.firstChildElement);
+            }
+            trigger('blockAdded', dropTarget, newNode);
+        }
+    }
+
+###### `dragEnd(evt)`方法
+当鼠标抬起时，处理完drop事件后，触发dragend事件。这里我们qingchu之前在drag过程中增加的class属性值，恢复原状。
+
+    function _findAndRemoveClass(klass){
+        var elem = document.querySelector('.' + klass);
+        if (elem){ elem.classList.remove(klass); }
+    }
+
+    function dragEnd(evt){
+        _findAndRemoveClass('dragging');
+        _findAndRemoveClass('over');
+        _findAndRemoveClass('next');
+    }
+    
+###### 添加事件监听
+添加事件与处理函数之间的关联
+
+    document.addEventListener('dragstart', dragStart, false);
+    document.addEventListener('dragenter', dragEnter, false);
+    document.addEventListener('dragover', dragOver, false);
+    document.addEventListener('drag', function(){}, false);
+    document.addEventListener('drop', drop, false);
+    document.addEventListener("dragend", dragEnd, false);
+    
+## menu.js
+menu.js文件中存储了blocks与运行方法的关联，包含了用户编码完成后实际运行script的代码。每次修改script，就会自动重新运行。
+这里的“Menu”实际并不是菜单，而是可以选择的block的列表。文件将这些设置好放在Menu中，以一个非常有用的循环block开头。这个文件更像是一个存放不适合放在其他地方的零碎杂物的文件。
+
+用一个单独的文件来收集随意偶然的函数是有用的，特别是在开发过程中。我保持房屋整洁的理念是要有指定的地方放置杂物，我觉得这同样可以应用于程序结构设计。一个文件或模块可以用来归总那些没有清晰定位的东西，随着这个文件的增长，在其中寻找出浮现的模式变得重要：几个相关的方法可以被分割放进一个单独的模块中（或连接成一个更通用的方法）。你不会期望这个归总的文件无限制的增长，它只是一个临时的存放点直到你找到合适的方法去组织代码。
+
+###### 定义一些变量
+- 保持了对`script`和`menu`的引用，因为经常使用到，这样就不需要一遍遍的在整个DOM中寻找。
+- 同样定义了`scriptRegistry`来存放menu中的block。在这里我们使用了非常简单的name-to-script映射，不支持多个block对应同一名字或重命名。更复杂的脚本环境需要更稳健的关系。
+- 使用`scriptDirty`跟踪基本在上次运行之后脚本是否被修改了，这样我们就不需要去持续运行脚本了。
+
+
+    var menu = document.querySelector('.menu');
+    var script = document.querySelector('.script');
+    var scriptRegistry = {};
+    var scriptDirty = false;
+    
+###### `runSoon()`,`run()`,`runEach()`函数
+当我们想去指示系统在下一帧运行脚本时，我们调用`runSoon()`方法将`scriptDirty`设为`true`。系统在每一帧都调用`run()`，除非scriptDirty被设置为真否则立即返回。当scriptDirty为真时，会运行脚本内的所有block，斌且触发事件去采用具体的语言处理脚本运行前后的任务。遮掩减弱block与具体语言之间的关系（turtle），使得block的课重用性更高。
+
+作为脚本运行的一部分，我们遍历block，在每个block上调用`runEach(evt)`方法，为block设置一个正在运行的class属性值，找到并执行相应的函数。如果把速度放慢，应该可以看到代码运行，block会高亮显示。
+
+The `requestAnimationFrame`方法由浏览器的动画机制提供，它接受一个函数作为参数，在该函数运行完成后的下一帧时被浏览器调用（由浏览器决定重绘频率，通常60 frames per second）。实际可以得到多少帧取决于函数完成操作的速度。
+
+    function runSoon(){ scriptDirty = true; }
+
+    function run(){
+        if (scriptDirty){ //若script被修改了
+            scriptDirty = false;
+            Block.trigger('beforeRun', script); //为script触发`beforeRun`事件
+            var blocks = [].slice.call(
+                document.querySelectorAll('.script > .block')); //选择script下的block，只包含script的子元素（不包括孙元素即其他后代）并以数组方式存储
+            Block.run(blocks); //调用bloks.js中的runBlocks函数，给blocks中的所有block触发`run`事件
+            Block.trigger('afterRun', script); //为script触发`afterRun`事件
+        }else{
+            Block.trigger('everyFrame', script); //为script触发`everyFrame`事件
+        }
+        requestAnimationFrame(run); //设定下一帧运行run方法
+    }
+    requestAnimationFrame(run);// 开始运行，后续在run中重复调用该方法，从而实现每一帧循环运行run
+
+    function runEach(evt){ //`run`事件处理函数
+        var elem = evt.target;
+        if (!matches(elem, '.script .block')) return;
+        if (elem.dataset.name === 'Define block') return;
+        elem.classList.add('running'); // 增加及后续删除running属性值，用于在block运行期间高亮
+        scriptRegistry[elem.dataset.name](elem); // 运行与block相对应的函数
+        elem.classList.remove('running');
+    }
+    
+###### `menuItem(name, fn, value, contents)`函数
+这个函数用于创建一个block，并且与一个函数关联（`scriptRegistry[name]=fn`），并将block放在menu中。
+
+    function menuItem(name, fn, value, units){
+        var item = Block.create(name, value, units);
+        scriptRegistry[name] = fn;
+        menu.appendChild(item);
+        return item;
+    }
+
+###### `repeat(block)` 函数
+在turtle language之外定义了repeat函数, 因为这样可以在不同的语言间通用。如果设置了用于条件或读写变量的block，也可以在这里定义，或放在一个单独的跨语言模块中。
+
+    function repeat(block){
+        var count = Block.value(block);  // 得到block的值
+        var children = Block.contents(block);  // 得到block的子元素，即block内container的子元素
+        for (var i = 0; i < count; i++){
+            Block.run(children);  // 为每个子元素触发run事件
+        }
+    }
+    menuItem('Repeat', repeat, 10, []); // 在Menu中创建repeat block，并于repeat函数关联
+    
+##### 注册事件及方法
+定义Menu的全局方法，`runSoon`和`item`。添加事件监听器，页面的`drop`事件和script的`change``keyup`事件都由`runSoon`处理，block的`run`事件由`runEach`函数处理
+```	
+    global.Menu = {
+		runSoon: runSoon,
+		item: menuItem
+	};
+
+	document.addEventListener('drop', runSoon, false);
+	script.addEventListener('run', runEach, false);
+	script.addEventListener('change', runSoon, false);
+	script.addEventListener('keyup', runSoon, false);
+```
+
+
+## turtle.js
+
+turtle.js 文件负责turtle语言的执行。它不向代码的其他部分开放任何方法，所有其他代码不依赖于它。这样我们可以更换新的块语言而不需要直到内核中实际是什么。
+
+###### 预定义变量
+
+    var PIXEL_RATIO = window.devicePixelRatio || 1;  // 物理像素与设备独立像素比，即一个像素实际对应几个物理像素
+    var canvasPlaceholder = document.querySelector('.canvas-placeholder');  // 网页中存放convas的元素,convas是他的子元素
+    var canvas = document.querySelector('.canvas');  // 画布的位置
+    var script = document.querySelector('.script');  // 脚本的位置
+    // 返回一个用于在画布上绘图的环境 参数 contextID 指定了您想要在画布上绘制的类型。
+    // 当前唯一的合法值是 "2d"，它指定了二维绘图，并且导致这个方法返回一个环境对象，该对象导出一个二维绘图 API
+    var ctx = canvas.getContext('2d');  
+    var cos = Math.cos, sin = Math.sin, sqrt = Math.sqrt, PI = Math.PI;
+    var DEGREE = PI / 180;
+    var WIDTH, HEIGHT, position, direction, visible, pen, color;
+    
+###### `onResize()`函数
+响应更改网页大小事件的重绘函数
+
+    function onResize(evt){
+        // getBoundingClientRect() 返回元素的大小及其相对于视口的位置,
+    	WIDTH = canvasPlaceholder.getBoundingClientRect().width * PIXEL_RATIO;  // 得到可以容纳convas的大小
+    	HEIGHT = canvasPlaceholder.getBoundingClientRect().height * PIXEL_RATIO;
+    	canvas.setAttribute('width', WIDTH);  // 将画布的大小重设为变化后的大小
+    	canvas.setAttribute('height', HEIGHT);
+    	canvas.style.top = canvasPlaceholder.getBoundingClientRect().top + "px";  // 得到变化后的位置
+    	canvas.style.left = canvasPlaceholder.getBoundingClientRect().left + "px";
+    	canvas.style.width = (WIDTH / PIXEL_RATIO) + "px"
+    	canvas.style.height = (HEIGHT / PIXEL_RATIO) + "px"
+    	if (evt){ 
+    		Menu.runSoon();   // 通知系统重绘
+    	}
+    }
+	
+###### `reset()`
+`reset()`函数清空所有默认的环境变量。如果我们要支持多个turtle，这些变量将被封装在1个对象中。  
+`deg2rad(deg)`函数，用于角度到弧度的变换，因为我们用角度绘图。  
+`drawTurtle()`函数，绘制turtlr自身，默认的turtle是一个三角形，你可以重写这个函数以绘制一个更形象的turtle。drawTurtle使用的是与turtle绘图同样的基础操作。有时候你不想在不同的抽象层重用代码，但当含义清晰时，对代码大小和性能来说是一个大胜利。
+
+    function reset(){
+        recenter();
+        direction = deg2rad(90); // facing "up"
+        visible = true;
+        pen = true; // when pen is true we draw, otherwise we move without drawing
+        color = 'black';
+    }
+
+    function deg2rad(degrees){ return DEGREE * degrees; }
+
+    function drawTurtle(){
+        var userPen = pen; // save pen state
+        if (visible){
+            penUp(); _moveForward(5); penDown();
+            _turn(-150); _moveForward(12);
+            _turn(-120); _moveForward(12);
+            _turn(-120); _moveForward(12);
+            _turn(30);
+            penUp(); _moveForward(-5);
+            if (userPen){
+                penDown(); // restore pen state
+            }
+        }
+    }
+    
+###### 画圆函数`drawCircle(radius)`
+在鼠标位置根据指定的半径画圆。你当然可以通过重复`MOVE 1 RIGHT 1`100次来画圆,但这样控制圆形的大小很困难，所以单独提供了这个函数。
+
+    function drawCircle(radius){
+        // Math for this is from http://www.mathopenref.com/polygonradius.html
+        var userPen = pen; // save pen state
+        if (visible){
+            penUp(); _moveForward(-radius); penDown();
+            _turn(-90);
+            var steps = Math.min(Math.max(6, Math.floor(radius / 2)), 360);
+            var theta = 360 / steps;
+            var side = radius * 2 * Math.sin(Math.PI / steps);
+            _moveForward(side / 2); //画圆的起点是第一条边的中点，画完第一条边的一半，最后再画完第一条边的后一半
+            for (var i = 1; i < steps; i++){
+                _turn(theta); _moveForward(side);
+            }
+            _turn(theta); _moveForward(side / 2);
+            _turn(90);
+            penUp(); _moveForward(radius); penDown();
+            if (userPen){
+                penDown(); // restore pen state
+            }
+        }
+    }
+
+####### `_moveForward(distance)`函数
+最主要的基础函数是`moveForward`，处理基础的三角学操作及检查画笔是否落下。主要内容是从从目前位置向目前方向按照指定长度画线。  
+函数开头的下划线表示这是个私有函数，不对外开放。
+
+    function _moveForward(distance){  
+        var start = position;
+        position = {
+            x: cos(direction) * distance * PIXEL_RATIO + start.x,
+            y: -sin(direction) * distance * PIXEL_RATIO + start.y
+        };
+        if (pen){
+            ctx.lineStyle = color;
+            ctx.beginPath();
+            ctx.moveTo(start.x, start.y);
+            ctx.lineTo(position.x, position.y);
+            ctx.stroke();
+        }
+    }
+    
+###### 其他turtle绘图函数
+其他turtle绘图方法可以从以上定义的函数定义而来。
+
+    function penUp(){ pen = false; }
+    function penDown(){ pen = true; }
+    function hideTurtle(){ visible = false; }
+    function showTurtle(){ visible = true; }
+    function forward(block){ _moveForward(Block.value(block)); }
+    function back(block){ _moveForward(-Block.value(block)); }
+    function circle(block){ drawCircle(Block.value(block)); }
+    function _turn(degrees){ direction += deg2rad(degrees); }
+    function left(block){ _turn(Block.value(block)); }
+    function right(block){ _turn(-Block.value(block)); }
+    function recenter(){ position = {x: WIDTH/2, y: HEIGHT/2}; }
+    
+###### `clear()`函数
+当需要一个干净的画板时, clear函数将所有都恢复成初始环境
+
+    function clear(){
+        ctx.save();  // 保存画布目前渲染环境状态，主要包含多种绘图的样式状态（属性有线的样式、填充样式、阴影样式、文本样式）
+        ctx.fillStyle = 'white';  
+        ctx.fillRect(0,0,WIDTH,HEIGHT); // 将画布用白色填充
+        ctx.restore();  // 恢复画布状态
+        reset();  // 重置参数
+        ctx.moveTo(position.x, position.y);  // 画笔移动到中心
+    }
+    
+###### 初次运行
+当脚本第一次加载和运行时，使用reset和clear进行初始化和绘制turtle。
+
+    onResize();
+    clear();
+    drawTurtle();
+    
+###### 绘图方法关联
+将这里定义的绘图方法配合menu中的block即Menu.item方法，制作menu中的block。
+
+    Menu.item('Left', left, 5, 'degrees');
+    Menu.item('Right', right, 5, 'degrees');
+    Menu.item('Forward', forward, 10, 'steps');
+    Menu.item('Back', back, 10, 'steps');
+    Menu.item('Circle', circle, 20, 'radius');
+    Menu.item('Pen up', penUp);
+    Menu.item('Pen down', penDown);
+    Menu.item('Back to center', recenter);
+    Menu.item('Hide turtle', hideTurtle);
+    Menu.item('Show turtle', showTurtle);
+    
+###### 添加事件监听
+
+    script.addEventListener('beforeRun', clear, false); // always clear canvas first
+    script.addEventListener('afterRun', drawTurtle, false); // show turtle if visible
+    window.addEventListener('resize', onResize, false);

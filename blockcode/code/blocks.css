@@ -29,3 +29,4 @@ h1{ margin: 0em; }
 .menu .container{ background-color: PeachPuff; }
 .over .container{ background-color: CadetBlue;  }
 
+/* 通过把两个类选择器链接在一起（中间没有空格, 有空格表示后代元素；用>表示只选择子元素），仅可以选择同时包含这些类名的元素（类名的顺序不限）。*/

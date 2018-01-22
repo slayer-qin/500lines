@@ -25,9 +25,9 @@
 		}else{
             Block.trigger('everyFrame', script);
         }
-		requestAnimationFrame(run);
+		requestAnimationFrame(run); // 通知系统以一定的时间间隔调用run
 	}
-	requestAnimationFrame(run);
+	requestAnimationFrame(run);  // 循环调用run
 
 	function runEach(evt){
 		var elem = evt.target;
